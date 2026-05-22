@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data & artifacts (DO NOT commit large files)
+data/
+*.parquet
+*.arrow
+*.bin
+*.faiss
+*.hnsw
+*.npy
+*.npz
+embeddings_cache.sqlite
+index_store/
+wikipedia_dump/
+
+# Logs & runtime
+*.log
+logs/
+runs/
+
+# Docker / k8s local state
+.docker/
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key

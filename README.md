@@ -1,3 +1,15 @@
+---
+title: VEKTOR
+emoji: 🔍
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 8000
+pinned: false
+license: mit
+short_description: From-scratch semantic search — HNSW + hybrid + reranker
+---
+
 # VEKTOR
 
 **Semantic search infrastructure at scale.** Custom embedding pipeline, from-scratch HNSW index, hybrid dense+sparse retrieval, and a self-improving cross-encoder reranker — designed to serve sub-50ms p99 search over millions of documents.

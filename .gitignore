@@ -36,8 +36,9 @@ htmlcov/
 .ipynb_checkpoints/
 *.ipynb
 
-# Data & artifacts (DO NOT commit large files)
-data/
+# Data & artifacts (DO NOT commit large files) — but keep the sample for Railway demo
+data/*
+!data/sample.jsonl
 *.parquet
 *.arrow
 *.bin

@@ -4,13 +4,18 @@ Example:
     python scripts/build_index.py \\
         --source data/wikipedia.jsonl \\
         --backend hnsw \\
-        --out index_store/wiki_hnsw \\
-        --max-docs 100000 \\
-        --build-sparse
+        --out index_store/wiki \\
+        --max-docs 10000
+
+Outputs:
+    index_store/wiki.hnsw  (or .flat)
+    index_store/wiki.bm25  (when --build-sparse)
+    index_store/wiki.docs.jsonl  (chunk_id → text, for rerank lookup)
 """
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -72,8 +77,24 @@ def main(
     dense = build_index(backend, settings.embed_dim)
     sparse = BM25Index() if build_sparse else None
 
+    docs_out_path = Path(str(out_path) + ".docs.jsonl")
+    docs_out = docs_out_path.open("w", encoding="utf-8")
+
     t0 = time.time()
-    total_chunks = 0
+    docs_processed = 0
+    chunks_buffer_texts: list[str] = []
+    chunks_buffer_ids: list[str] = []
+    BUFFER = 256  # batched embed across documents to amortize model overhead
+
+    def flush_buffer():
+        if not chunks_buffer_texts:
+            return
+        vectors = embedder.encode(chunks_buffer_texts)
+        dense.add_batch(vectors, chunks_buffer_ids)
+        if sparse is not None:
+            sparse.add_batch(chunks_buffer_texts, chunks_buffer_ids)
+        chunks_buffer_texts.clear()
+        chunks_buffer_ids.clear()
 
     docs = load_jsonl(source, id_field=id_field, text_field=text_field)
     pbar = tqdm(docs, desc="ingesting", unit="doc")
@@ -82,32 +103,33 @@ def main(
         if max_docs is not None and i >= max_docs:
             break
         chunks = chunker.chunk(doc_id, text)
-        if not chunks:
-            continue
-        texts = [c.text for c in chunks]
-        ids = [c.chunk_id for c in chunks]
-        try:
-            vectors = embedder.encode(texts)
-            dense.add_batch(vectors, ids)
-        except NotImplementedError:
-            # HNSW.add not yet implemented — Kriti hasn't filled it in
-            click.echo(
-                "\nHNSW.add is a stub — implement vektor/index/hnsw.py "
-                "or run with --backend flat to test the pipeline.",
-                err=True,
+        for c in chunks:
+            chunks_buffer_texts.append(c.text)
+            chunks_buffer_ids.append(c.chunk_id)
+            docs_out.write(
+                json.dumps({"chunk_id": c.chunk_id, "doc_id": doc_id, "text": c.text}) + "\n"
             )
-            raise SystemExit(1)
-        if sparse is not None:
-            sparse.add_batch(texts, ids)
-        total_chunks += len(chunks)
+            if len(chunks_buffer_texts) >= BUFFER:
+                flush_buffer()
+        docs_processed += 1
+
+    flush_buffer()
+    docs_out.close()
 
     dt = time.time() - t0
-    click.echo(f"\nindexed {dense.size} chunks in {dt:.1f}s ({dense.size / max(dt, 0.001):.1f} chunk/s)")
+    click.echo(
+        f"\nindexed {dense.size} chunks from {docs_processed} docs in {dt:.1f}s "
+        f"({dense.size / max(dt, 0.001):.1f} chunk/s)"
+    )
 
-    dense.save(Path(str(out_path) + f".{backend}"))
+    dense_out = Path(str(out_path) + f".{backend}")
+    dense.save(dense_out)
+    click.echo(f"saved dense → {dense_out}")
     if sparse is not None:
-        sparse.save(Path(str(out_path) + ".bm25"))
-    click.echo(f"saved → {out_path}.{backend}" + (f" and {out_path}.bm25" if sparse else ""))
+        sparse_out = Path(str(out_path) + ".bm25")
+        sparse.save(sparse_out)
+        click.echo(f"saved sparse → {sparse_out}")
+    click.echo(f"saved docs → {docs_out_path}")
 
 
 if __name__ == "__main__":

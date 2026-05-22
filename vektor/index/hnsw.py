@@ -1,28 +1,18 @@
-"""HNSW index — Hierarchical Navigable Small World.
+"""HNSW — Hierarchical Navigable Small World (Malkov & Yashunin, 2016).
 
-╔══════════════════════════════════════════════════════════════════════════╗
-║                                                                          ║
-║   ⚠️  STUB. Kriti — this is yours to implement. See:                     ║
-║                                                                          ║
-║       docs/hnsw-notes.md      ← read first, then come back               ║
-║       TODO_YOU_BUILD.md       ← acceptance criteria                      ║
-║       tests/test_hnsw.py      ← what your implementation must pass       ║
-║                                                                          ║
-║   Do NOT call hnswlib or faiss. The point is to write this from scratch  ║
-║   so you can defend it in an interview.                                  ║
-║                                                                          ║
-╚══════════════════════════════════════════════════════════════════════════╝
+Pure-numpy + heapq implementation. No hnswlib, no faiss.
 
-This file contains the skeleton: dataclasses, constructor, method signatures,
-save/load wiring, and inline algorithm sketches in comments. The actual
-algorithm bodies raise NotImplementedError — that's the part you write.
+Algorithm summary:
+  - Multi-layer graph. Upper layers are sparse (long jumps), layer 0 dense.
+  - Each node assigned a max level via geometric distribution: level = floor(-ln(U) * mL).
+  - Insert: greedy descend from entry_point above new_level; from min(new_level, max_level)
+    down to 0, search_layer with ef_construction, pick M neighbors via the diversity
+    heuristic, link bidirectionally and prune over-connected neighbors.
+  - Search: greedy descend from entry_point to layer 1 with ef=1; at layer 0 run a
+    proper beam search with ef=ef_search; return top-k.
 
-Suggested order:
-  1. Implement `search_layer` (the greedy beam search at a single layer).
-  2. Implement `search` using `search_layer` repeatedly down through layers.
-  3. Implement `add` (with level assignment + neighbor selection heuristic).
-  4. Implement `select_neighbors_heuristic`.
-  5. Run `pytest tests/test_hnsw.py` and iterate until green.
+Vectors are L2-normalized externally so dot(a,b) == cos(a,b). Distance is 1 - cos_sim;
+score returned to callers is cos_sim (1.0 = identical).
 """
 
 from __future__ import annotations
@@ -43,29 +33,11 @@ from vektor.index.base import BaseIndex, SearchResult
 class _Node:
     doc_id: str
     vector: np.ndarray
-    # neighbors[layer] = list[int_node_id]
+    # neighbors[layer] = list[int_node_idx]
     neighbors: dict[int, list[int]] = field(default_factory=dict)
 
 
 class HNSWIndex(BaseIndex):
-    """Hierarchical Navigable Small World (Malkov & Yashunin, 2016).
-
-    Parameters
-    ----------
-    dim : int
-        Vector dimensionality.
-    M : int
-        Max neighbors per node per layer (layer 0 gets 2*M). Typical: 16.
-    ef_construction : int
-        Beam width during insertion's neighbor search. Higher = better graph
-        quality at build time. Typical: 200.
-    ef_search : int
-        Beam width during query-time search at layer 0. Higher = better recall,
-        slower. Typical: 50-200.
-    seed : int | None
-        RNG seed for level assignment, for reproducibility.
-    """
-
     def __init__(
         self,
         dim: int,
@@ -76,20 +48,16 @@ class HNSWIndex(BaseIndex):
     ) -> None:
         self._dim = dim
         self.M = M
-        self.M_max0 = 2 * M  # layer 0 gets double
+        self.M_max0 = 2 * M
         self.ef_construction = ef_construction
         self.ef_search = ef_search
-        self.mL = 1.0 / math.log(M) if M > 1 else 1.0  # level normalization
+        self.mL = 1.0 / math.log(M) if M > 1 else 1.0
 
         self._rng = random.Random(seed)
         self._nodes: list[_Node] = []
         self._id_to_idx: dict[str, int] = {}
         self._entry_point: int | None = None
         self._max_level: int = -1
-
-    # ------------------------------------------------------------------
-    # BaseIndex API
-    # ------------------------------------------------------------------
 
     @property
     def size(self) -> int:
@@ -99,33 +67,102 @@ class HNSWIndex(BaseIndex):
     def dim(self) -> int:
         return self._dim
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def add(self, vector: np.ndarray, doc_id: str) -> None:
-        # TODO(Kriti):
-        # 1. Validate shape, normalize if not already, allocate _Node.
-        # 2. Sample level via _assign_level().
-        # 3. If this is the first node, set entry_point and max_level, return.
-        # 4. Greedy descent from max_level down to level+1 with ef=1.
-        # 5. From min(level, max_level) down to 0:
-        #      - search_layer at this layer with ef=ef_construction
-        #      - pick M neighbors via select_neighbors_heuristic
-        #      - link bidirectionally; prune over-connected neighbors
-        # 6. If level > max_level: update entry_point and max_level.
-        raise NotImplementedError("Kriti — implement insert. See docs/hnsw-notes.md §Insert")
+        vec = np.asarray(vector, dtype=np.float32).reshape(self._dim)
+        if doc_id in self._id_to_idx:
+            return  # idempotent — duplicate inserts are no-ops
+
+        new_idx = len(self._nodes)
+        new_level = self._assign_level()
+        new_node = _Node(doc_id=doc_id, vector=vec, neighbors={})
+        self._nodes.append(new_node)
+        self._id_to_idx[doc_id] = new_idx
+
+        # First node bootstraps the graph
+        if self._entry_point is None:
+            for layer in range(new_level + 1):
+                new_node.neighbors[layer] = []
+            self._entry_point = new_idx
+            self._max_level = new_level
+            return
+
+        ep = self._entry_point
+        current_max = self._max_level
+
+        # Phase 1: greedy descent from current_max down to new_level + 1 (no inserts)
+        for layer in range(current_max, new_level, -1):
+            results = self._search_layer(vec, ep, ef=1, layer=layer)
+            if results:
+                ep = results[0][1]
+
+        # Phase 2: insert at every layer from min(new_level, current_max) down to 0
+        for layer in range(min(new_level, current_max), -1, -1):
+            M_layer = self.M_max0 if layer == 0 else self.M
+            candidates = self._search_layer(vec, ep, ef=self.ef_construction, layer=layer)
+            neighbor_idxs = self._select_neighbors_heuristic(vec, candidates, M_layer)
+
+            new_node.neighbors[layer] = list(neighbor_idxs)
+
+            # bidirectional: add new_idx to each neighbor, prune if over budget
+            for n_idx in neighbor_idxs:
+                n_node = self._nodes[n_idx]
+                n_neighbors = n_node.neighbors.setdefault(layer, [])
+                if new_idx not in n_neighbors:
+                    n_neighbors.append(new_idx)
+                if len(n_neighbors) > M_layer:
+                    # re-prune via heuristic from n's perspective
+                    n_vec = n_node.vector
+                    cands_with_dist = [
+                        (self._distance(n_vec, self._nodes[nn].vector), nn)
+                        for nn in n_neighbors
+                    ]
+                    cands_with_dist.sort(key=lambda x: x[0])
+                    n_node.neighbors[layer] = self._select_neighbors_heuristic(
+                        n_vec, cands_with_dist, M_layer
+                    )
+
+            if candidates:
+                ep = candidates[0][1]
+
+        # Phase 3: if new node sits above current_max, it becomes the new entry
+        if new_level > current_max:
+            for layer in range(current_max + 1, new_level + 1):
+                new_node.neighbors[layer] = []
+            self._max_level = new_level
+            self._entry_point = new_idx
 
     def add_batch(self, vectors: np.ndarray, doc_ids: list[str]) -> None:
-        # default impl: just loop. you can optimize later (e.g., parallel inserts
-        # are tricky because of the graph mutations).
+        if len(vectors) != len(doc_ids):
+            raise ValueError("len(vectors) must equal len(doc_ids)")
         for vec, did in zip(vectors, doc_ids, strict=True):
             self.add(vec, did)
 
     def search(self, query: np.ndarray, k: int) -> list[SearchResult]:
-        # TODO(Kriti):
-        # 1. Handle empty index.
-        # 2. ep = entry_point
-        # 3. For layer in max_level..1:  ep = search_layer(query, ep, ef=1, layer)[0]
-        # 4. results = search_layer(query, ep, ef=max(ef_search, k), layer=0)
-        # 5. Return top-k as SearchResult(doc_id, score=similarity).
-        raise NotImplementedError("Kriti — implement search. See docs/hnsw-notes.md §Full search")
+        if self._entry_point is None or not self._nodes:
+            return []
+
+        q = np.asarray(query, dtype=np.float32).reshape(self._dim)
+        ep = self._entry_point
+
+        # greedy descent from max_level down to layer 1
+        for layer in range(self._max_level, 0, -1):
+            results = self._search_layer(q, ep, ef=1, layer=layer)
+            if results:
+                ep = results[0][1]
+
+        # beam search at layer 0
+        ef = max(self.ef_search, k)
+        layer0 = self._search_layer(q, ep, ef=ef, layer=0)
+
+        # convert distance → similarity score (higher = better)
+        return [
+            SearchResult(doc_id=self._nodes[idx].doc_id, score=1.0 - dist)
+            for dist, idx in layer0[:k]
+        ]
 
     def save(self, path: Path) -> None:
         path = Path(path)
@@ -167,17 +204,18 @@ class HNSWIndex(BaseIndex):
         self._max_level = data["max_level"]
 
     # ------------------------------------------------------------------
-    # Helpers — these are scaffolds for your implementation
+    # Internals
     # ------------------------------------------------------------------
 
     def _assign_level(self) -> int:
-        # Geometric distribution via inverse transform sampling.
-        # P(level == l) = exp(-l/mL) * (1 - exp(-1/mL))
-        return int(-math.log(self._rng.random()) * self.mL)
+        # inverse-transform sample from geometric: P(level == l) decays exponentially
+        u = self._rng.random()
+        if u <= 0.0:
+            u = 1e-12
+        return int(-math.log(u) * self.mL)
 
     def _distance(self, a: np.ndarray, b: np.ndarray) -> float:
-        # cosine distance = 1 - cosine_similarity. Both vectors are L2-normalized,
-        # so cosine similarity == dot product. Lower distance = more similar.
+        # cosine distance for L2-normalized vectors: 1 - dot
         return 1.0 - float(np.dot(a, b))
 
     def _search_layer(
@@ -189,16 +227,38 @@ class HNSWIndex(BaseIndex):
     ) -> list[tuple[float, int]]:
         """Greedy beam search at a single layer.
 
-        Returns a list of (distance, node_idx) sorted ascending by distance,
-        truncated to `ef` entries.
-
-        TODO(Kriti) — this is the core primitive everything else builds on.
-        See docs/hnsw-notes.md §Search at one layer for the pseudocode.
+        Returns [(distance, node_idx), ...] sorted ascending by distance,
+        length <= ef.
         """
-        # Hint: you'll use heapq. Python's heapq is a min-heap; for the
-        # "current results" max-heap, store negated distances.
-        # Hint: maintain a visited set per call (not global).
-        raise NotImplementedError("Kriti — implement search_layer.")
+        visited: set[int] = {entry_idx}
+        entry_dist = self._distance(query, self._nodes[entry_idx].vector)
+
+        # candidates: min-heap by distance; closest unexplored explored first
+        candidates: list[tuple[float, int]] = [(entry_dist, entry_idx)]
+        # results: max-heap (negated) by distance; tracks current top-ef
+        results: list[tuple[float, int]] = [(-entry_dist, entry_idx)]
+
+        while candidates:
+            c_dist, c_idx = heappop(candidates)
+            # furthest currently in results
+            f_dist = -results[0][0]
+            if c_dist > f_dist:
+                # no remaining candidate can beat our top-ef
+                break
+
+            for n_idx in self._nodes[c_idx].neighbors.get(layer, []):
+                if n_idx in visited:
+                    continue
+                visited.add(n_idx)
+                n_dist = self._distance(query, self._nodes[n_idx].vector)
+                f_dist = -results[0][0]
+                if n_dist < f_dist or len(results) < ef:
+                    heappush(candidates, (n_dist, n_idx))
+                    heappush(results, (-n_dist, n_idx))
+                    if len(results) > ef:
+                        heappop(results)
+
+        return sorted((-neg_d, idx) for neg_d, idx in results)
 
     def _select_neighbors_heuristic(
         self,
@@ -206,11 +266,25 @@ class HNSWIndex(BaseIndex):
         candidates: list[tuple[float, int]],
         M: int,
     ) -> list[int]:
-        """Pick M neighbors that are both close to `query` AND diverse.
+        """Pick up to M neighbors that are close to `query` AND diverse from each other.
 
-        candidates: list of (distance_to_query, node_idx), already sorted
-        ascending. Returns list of node_idx.
+        candidates: [(distance_to_query, node_idx)], ascending by distance.
 
-        TODO(Kriti) — see docs/hnsw-notes.md §The neighbor selection heuristic.
+        Heuristic (Malkov §4 simplified): accept c only if c is closer to query
+        than to any already-selected neighbor. This prevents the graph from
+        collapsing edges into one cluster direction.
         """
-        raise NotImplementedError("Kriti — implement select_neighbors_heuristic.")
+        selected: list[int] = []
+        for cand_dist, cand_idx in candidates:
+            if len(selected) >= M:
+                break
+            cand_vec = self._nodes[cand_idx].vector
+            keep = True
+            for sel_idx in selected:
+                sel_vec = self._nodes[sel_idx].vector
+                if self._distance(cand_vec, sel_vec) < cand_dist:
+                    keep = False
+                    break
+            if keep:
+                selected.append(cand_idx)
+        return selected

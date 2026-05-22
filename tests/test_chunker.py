@@ -21,13 +21,13 @@ def test_chunker_keeps_single_short_doc_as_one_chunk():
 
 
 def test_chunker_splits_long_doc_at_sentence_boundary():
-    chunker = SemanticChunker(max_tokens=20)  # tiny budget → forces split
+    chunker = SemanticChunker(max_tokens=8, overlap_tokens=0)  # tiny budget → forces split
     text = "Sentence one is here. Sentence two follows. Sentence three concludes."
     chunks = chunker.chunk("doc1", text)
     assert len(chunks) >= 2
     for c in chunks:
         # each chunk should be roughly under budget (modulo overlap)
-        assert len(c.text) <= 20 * 4 * 2  # generous bound
+        assert len(c.text) <= 8 * 4 * 2  # generous bound
 
 
 def test_chunker_overlap_carries_context():
@@ -41,7 +41,7 @@ def test_chunker_overlap_carries_context():
 
 
 def test_chunker_hard_splits_oversized_sentence():
-    chunker = SemanticChunker(max_tokens=10)
+    chunker = SemanticChunker(max_tokens=10, overlap_tokens=0)
     long_sentence = " ".join(["word"] * 100) + "."
     chunks = chunker.chunk("doc1", long_sentence)
     assert len(chunks) >= 2

@@ -8,9 +8,6 @@ from vektor.index.base import SearchResult
 from vektor.retrieval.hybrid import rrf_fuse
 
 
-pytestmark = pytest.mark.skip(reason="RRF is a stub — un-skip after implementing vektor/retrieval/hybrid.py")
-
-
 def test_rrf_full_overlap_preserves_top():
     dense = [SearchResult("a", 0.9), SearchResult("b", 0.7)]
     sparse = [SearchResult("a", 5.0), SearchResult("b", 3.0)]

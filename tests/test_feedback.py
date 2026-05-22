@@ -52,13 +52,9 @@ def test_skip_above_yields_negative():
     assert ("test", "doc_b", "doc_a") in triples
 
 
-def test_hybrid_rrf_is_a_stub_for_now():
-    # documents the contract — when Kriti implements rrf_fuse this test
-    # should be updated to assert correct fusion behavior.
-    import pytest
-
+def test_hybrid_rrf_smoke():
     from vektor.index.base import SearchResult
     from vektor.retrieval.hybrid import rrf_fuse
 
-    with pytest.raises(NotImplementedError):
-        rrf_fuse([[SearchResult("a", 0.9)], [SearchResult("a", 0.5)]])
+    fused = rrf_fuse([[SearchResult("a", 0.9)], [SearchResult("a", 0.5)]])
+    assert fused[0].doc_id == "a"

@@ -1,15 +1,8 @@
-"""Hybrid retrieval fusion.
+"""Reciprocal Rank Fusion — merge ranked result lists from multiple retrievers.
 
-╔══════════════════════════════════════════════════════════════════════════╗
-║   ⚠️  STUB. Kriti — implement Reciprocal Rank Fusion (RRF) here.         ║
-║                                                                          ║
-║   Spec: TODO_YOU_BUILD.md §2                                             ║
-║   Paper: Cormack et al. 2009                                             ║
-║   Tests: tests/test_hybrid.py                                            ║
-║                                                                          ║
-║   Do NOT use weighted score sum. RRF is the right tool for this job;     ║
-║   the literature is clear and interviewers know it.                      ║
-╚══════════════════════════════════════════════════════════════════════════╝
+Cormack et al. 2009: for each doc, score = Σ 1 / (k + rank_in_retriever_i).
+k=60 is the paper's recommendation; it smooths the contribution of low-ranked
+docs and prevents any single retriever from dominating.
 """
 
 from __future__ import annotations
@@ -24,23 +17,31 @@ def rrf_fuse(
 ) -> list[SearchResult]:
     """Reciprocal Rank Fusion.
 
-    For each doc, score = sum over retrievers of 1 / (k + rank_in_that_retriever).
-    Docs absent from a retriever contribute 0 from that retriever.
-
     Parameters
     ----------
     result_lists : list[list[SearchResult]]
         One list per retriever, each ordered best-first.
     k : int
-        Smoothing constant. Cormack et al. recommend 60.
+        Smoothing constant. 60 is standard.
     top_k : int | None
-        If set, truncate the fused output. Default returns all unique docs.
+        Truncate fused output. None returns all unique docs.
 
     Returns
     -------
     list[SearchResult]
-        Fused ranking, best-first. score is the RRF score (not normalized).
-
-    TODO(Kriti) — implement. See TODO_YOU_BUILD.md §2.
+        Fused ranking, best-first. score is the RRF score (unnormalized).
     """
-    raise NotImplementedError("Kriti — implement RRF. See TODO_YOU_BUILD.md §2")
+    if not result_lists:
+        return []
+
+    scores: dict[str, float] = {}
+    for results in result_lists:
+        for rank, hit in enumerate(results):
+            scores[hit.doc_id] = scores.get(hit.doc_id, 0.0) + 1.0 / (k + rank + 1)
+
+    fused = [SearchResult(doc_id=did, score=score) for did, score in scores.items()]
+    fused.sort(key=lambda r: r.score, reverse=True)
+
+    if top_k is not None:
+        fused = fused[:top_k]
+    return fused

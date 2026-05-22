@@ -20,14 +20,20 @@ class Settings(BaseSettings):
 
     # Index
     index_path: Path = Path("./index_store")
-    index_backend: str = "hnsw"  # flat | hnsw | ivf
+    index_backend: str = "hnsw"  # flat | hnsw
     hnsw_m: int = 16
     hnsw_ef_construction: int = 200
     hnsw_ef_search: int = 100
 
+    # Startup-time index/doc loading (optional — if unset, API starts empty)
+    dense_index_path: Path | None = None
+    sparse_index_path: Path | None = None
+    doc_store_path: Path | None = None  # JSONL of {chunk_id, text} for rerank lookup
+
     # Rerank
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rerank_top_k: int = 50
+    enable_reranker: bool = False  # opt-in: cross-encoder load is slow
 
     # API
     api_host: str = "0.0.0.0"
